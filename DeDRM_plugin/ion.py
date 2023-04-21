@@ -835,6 +835,30 @@ def obfuscate(secret, version):
     return obfuscated
 
 
+def scramble(st,magic):
+    ret=bytearray(len(st))
+    padlen=len(st)
+    for counter in range(len(st)):
+        ivar2=(padlen//2)-2*(counter%magic)+magic+counter-1
+        ret[ivar2%padlen]=st[counter]
+    return ret
+
+
+def obfuscate2(secret, version):
+    if version == 1:  # v1 does not use obfuscation
+        return secret
+    magic, word = OBFUSCATION_TABLE["V%d" % version]
+    # extend secret so that its length is divisible by the magic number
+    if len(secret) % magic != 0:
+        secret = secret + b'\x00' * (magic - len(secret) % magic)
+    obfuscated = bytearray(len(secret))
+    wordhash = bytearray(hashlib.sha256(word).digest()[16:])
+    shuffled=bytearray(scramble(secret,magic))
+    for i in range(0, len(secret)):
+        obfuscated[i] = shuffled[i] ^ wordhash[i % 16]
+    return obfuscated
+
+
 class DrmIonVoucher(object):
     envelope = None
     version = None
@@ -878,12 +902,24 @@ class DrmIonVoucher(object):
             else:
                 _assert(False, "Unknown lock parameter: %s" % param)
 
+                
+        sharedsecrets = [obfuscate(shared, self.version),obfuscate2(shared, self.version)]
+        decrypted=False
+        ex=None
+        for sharedsecret in sharedsecrets:
+            key = hmac.new(sharedsecret, b"PIDv3", digestmod=hashlib.sha256).digest()
+            aes = AES.new(key[:32], AES.MODE_CBC, self.cipheriv[:16])
+            try:
+                b = aes.decrypt(self.ciphertext)
+                b = pkcs7unpad(b, 16)
+                decrypted=True 
+                print("Decryption succeeded")
+                break
+            except Exception as ex:
+                print("Decryption failed, trying next fallback ")
+        if not decrypted:
+            raise ex
         sharedsecret = obfuscate(shared, self.version)
-
-        key = hmac.new(sharedsecret, b"PIDv3", digestmod=hashlib.sha256).digest()
-        aes = AES.new(key[:32], AES.MODE_CBC, self.cipheriv[:16])
-        b = aes.decrypt(self.ciphertext)
-        b = pkcs7unpad(b, 16)
 
         self.drmkey = BinaryIonParser(BytesIO(b))
         addprottable(self.drmkey)
